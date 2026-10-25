@@ -29,6 +29,12 @@ Walking paths and driving routes for [open.mp](https://open.mp) NPCs.
   round or going the wrong way down a one-way street. Several chasers come up either
   side of their target. Drivers steer like cars: they curve into corners, brake for
   them, and back up to turn round in tight spots.
+- **Planes:** NPC pilots fly planes from gate to gate: pushed back, along the
+  taxiways, up, along a route and down a proper approach to a landing and a gate,
+  each plane kept to the runways, taxiways and gates its wings fit. Air traffic
+  control keeps them apart on runways, taxiways and in the air, with holds and
+  go-arounds. San Andreas' four airports are built in; add your own or reshape them
+  in a text file.
 - **Traffic sense:** every driver swerves round, or brakes behind, the vehicles in
   its way (other NPCs' cars, players' cars, parked cars), by each model's own
   collision box and where it is heading.
@@ -48,6 +54,7 @@ Nav_WalkTo(npcid, x, y, z);                // walk there along the navmesh
 Nav_DriveTo(npcid, x, y, z);               // drive the NPC's car there along the roads
 Nav_Chase(npcid, playerid);                // chase a player, on or off the road
 Nav_FlyTo(npcid, x, y, z);                 // fly the NPC's helicopter there
+Nav_Land(npcid, "LSIA");                   // land the NPC's plane at LS airport, taxi to a gate
 
 public OnNavMoveEnd(npcid, reason)
 {
@@ -91,6 +98,9 @@ uses what was baked while the server runs.
   - Cars are driven like cars: speed, braking and steering follow that model's
     numbers, with rays against `world.col` for walls, ledges and the ground ahead.
   - Helicopters fly their own flight model over the tops of whatever is ahead.
+  - Planes follow a pilot through each phase of a flight (src/pilot.cpp): on the
+    ground along paths planned for their turning circle and speed, in the air a
+    fixed-wing flight model, with air traffic control (src/atc.cpp) between them.
 - A chase plans again as its target moves, and keeps driving the old plan until
   the new one is ready.
 - Two kinds of extra links are added on top of the meshes at start:
@@ -120,7 +130,8 @@ loaded:
 [nav] loaded world.nav (walking)
 [nav] loaded vehicles.dnv: <models> vehicle models
 [nav] loaded world.col: <faces> faces
-[nav] DiamondNav 1.3.12: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
+[nav] 4 airports, 0 flight routes (0 airport files)
+[nav] DiamondNav 1.4.0: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
 ```
 
 ## Baking your world
@@ -384,6 +395,46 @@ own: no NPC_Move, the helicopter's position, rotation and velocity are set every
 and go out in its driver sync. Without `world.col` it keeps only to the height it is
 given.
 
+**Planes.** An NPC put in a plane as its driver flies it the way a pilot would:
+
+```pawn
+Nav_ParkPlane(npcid, "LSIA", "E1");       // at a gate, parked
+Nav_Takeoff(npcid, "", "LS_TO_LV");       // pushed back, taxi, take off, fly the route
+// ... OnNavMoveEnd(npcid, NAV_END_ARRIVED) once it has flown it
+Nav_Land(npcid, "LVA");                   // approach, land, taxi to a free gate that fits
+```
+
+- **On the ground** it taxis along the airport's taxiways on a path rounded to its
+  turning circle, slowing for turns, and a tug pushes it back off a gate. It keeps to
+  the taxiways and gates its wings fit, so an AT-400 never takes a taxiway that only
+  a Dodo fits down.
+- **Taking off,** it holds short of the runway until cleared, lines up, rolls and
+  rotates at its own speed, and climbs out (along the runway's departure fixes, if
+  it has any) before turning onto its route.
+- **Landing,** it picks the runway (long and wide enough for it, the airport's
+  preferred way), flies a pattern onto a straight final sized to the plane, comes
+  down the glide path, flares and touches down, brakes and turns off at the first
+  exit it can make, then taxis to the gate.
+- **Air traffic control** keeps one plane on a runway at a time, holds arrivals
+  when the runway will be busy, sends a plane round when the runway is not clear at
+  the decision point (or it is not lined up), and on the ground stops planes short
+  of each other and of vehicles in their way and has them give way at a taxiway
+  someone is coming along the other way.
+- **In the air** it keeps clear of the ground and buildings ahead in `world.col`,
+  climbing or turning away, and of other planes (the lower one turns right, the
+  higher climbs).
+- `Nav_FlyRoute` flies a route and then circles, `Nav_FlyTo` flies to a point, and
+  `Nav_Chase` goes after a player (keeping `carZ` metres over them).
+- `OnNavPlanePhase(npcid, phase)` reports each phase (pushback, taxi out, hold
+  short, line up, take-off, climb, cruise, holding, approach, final, go-around,
+  landing, taxi in, at gate), for camera shots, announcements or tickets.
+
+The airports are text files: San Andreas' four (LSIA, SFIA, LVA, Verdant Meadows)
+are built in, and `navmesh/airports/*.txt` add your own airports or reshape the
+stock ones (a new taxiway, a gate moved, a runway closed). See
+[docs/AIRPORTS.md](docs/AIRPORTS.md) for the format, the stock airports and how much
+runway each plane needs.
+
 **Lines.** `Nav_IsLineClear(x1, y1, z1, x2, y2, z2, kind)` says whether a ped
 (`NAV_MESH_PED`) or a car (`NAV_MESH_CAR`) can go straight between two points on the
 ground: no wall, drop or obstacle. It follows the ground, so it is not an eye-level
@@ -595,8 +646,10 @@ flat over time.
 - **Ledges and drops are incomplete:** walkers and chasers take some ledges and
   drops, but not all of them yet.
 - **Ramp chasing:** chasing a player up or down a ramp is not finished.
-- **No boats or planes:** NPCs walk, drive cars and fly helicopters. Boats and
-  planes are not driven yet.
+- **No boats:** NPCs walk, drive cars and fly helicopters and planes. Boats are not
+  driven yet.
+- **Planes on the ground take no physics either:** a plane keeps to its taxi path; a
+  player's car parked on a taxiway stops it rather than being pushed aside.
 
 ## Good to know
 

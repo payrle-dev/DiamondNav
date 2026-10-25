@@ -1,0 +1,137 @@
+# San Andreas airports, as the game ships them. Built into DiamondNav; a server's own
+# navmesh/airports/*.txt are read after this file and can change or remove anything in it
+# (see AIRPORTS_HELP in src/airports.cpp, or the Airports section of the README).
+#
+# Measured from the game's collision and top-down shots. Spans are the widest wings
+# that clear everything along a taxiway; the runways' holds short, crossings and
+# nodes along each runway are worked out when the file loads.
+
+# ── Los Santos International ────────────────────────────────────────────────────
+# Two parallel runways east-west, the terminal north of them. The crossovers between
+# the runways are mostly blocked by barriers: big planes go round the loop at the
+# east end, small ones through the gaps in the barrier east of the middle.
+airport LSIA Los Santos International
+prefer 90
+runway 09L/27R 1400 -2492.5 12.55 2060 -2492.5 12.55 width 31 displaced 09L 40
+runway 09R/27L 1400 -2592.5 12.55 2060 -2592.5 12.55 width 31
+
+# The loop round the east end.
+node N_E   2060   -2492.5 12.55
+node L1    2085   -2499.2 12.55
+node L2    2103.3 -2517.5 12.55
+node L3    2110   -2542.5 12.55
+node L4    2103.3 -2567.5 12.55
+node L5    2085   -2585.8 12.55
+node S_E   2060   -2592.5 12.55
+taxi LOOP N_E L1 L2 L3 L4 L5 S_E
+
+# The gaps through the barrier between the runways.
+node N_1855 1855 -2492.5 12.55
+node S_1855 1855 -2592.5 12.55
+taxi X1 span 25 N_1855 S_1855
+node N_1908 1908 -2492.5 12.55
+node S_1908 1908 -2592.5 12.55
+taxi X2 span 20 N_1908 S_1908
+
+# Small planes at the terminal's pods, pushed back onto the north runway.
+node N_1524 1524 -2492.5 12.55
+node N_1601 1601 -2492.5 12.55
+node N_1680 1680 -2492.5 12.55
+node N_1765 1765 -2492.5 12.55
+gate P1 1524 -2442 12.55 0 span 30 lead N_1524 push N_1524
+gate P2 1601 -2442 12.55 0 span 30 lead N_1601 push N_1601
+gate P3 1680 -2442 12.55 0 span 30 lead N_1680 push N_1680
+gate P4 1765 -2442 12.55 0 span 30 lead N_1765 push N_1765
+
+# Big planes on the east apron.
+node N_1925 1925 -2492.5 12.55
+node N_1990 1990 -2492.5 12.55
+gate E1 1925 -2410 12.55 0 lead N_1925 push N_1925
+gate E2 1990 -2420 12.55 0 lead N_1990 push N_1990
+
+# ── San Fierro International ───────────────────────────────────────────────────
+# One runway along the bay, south-west to north-east. Taxiway A runs beside it to the
+# south-east; the terminal's three jet bridges and two stands by the hangars are off
+# the apron lane at its middle exit.
+airport SFIA San Fierro International
+prefer 225
+runway 04/22 -1640 -148 13.15 -1078 414 13.15 width 32
+node R36 -1614.5 -122.5 13.15
+node A36 -1572.1 -165.0 13.15
+taxi E36 R36 A36
+node R120 -1555.1 -63.1 13.15
+node A120 -1512.7 -105.6 13.15
+taxi E120 R120 A120
+node R262 -1454.7 37.3 13.15
+node A262 -1412.3 -5.2 13.15
+taxi E262 R262 A262
+node R420 -1343.0 149.0 13.15
+node A420 -1300.6 106.6 13.15
+taxi E420 R420 A420
+taxi A A36 A120 A262 A420
+node T0 -1348.7 -68.8 13.15
+node T1 -1313.3 -104.2 13.15
+gate G1 -1362.8 -153.7 13.15 135 span 63 lead T1 push T1
+node T2 -1267.4 -150.1 13.15
+gate G2 -1316.9 -199.6 13.15 135 span 63 lead T2 push T2
+node T3 -1221.4 -196.1 13.15
+gate G3 -1270.9 -245.6 13.15 135 span 63 lead T3 push T3
+taxi T A262 T0 T1 T2 T3
+node H1 -1321.8 -41.9 13.15
+gate S1 -1293.5 -70.2 13.15 225 span 30 lead H1 push H1
+node H2 -1293.5 -13.6 13.15
+gate S2 -1265.2 -41.9 13.15 225 span 30 lead H2 push H2
+taxi H span 40 T0 H1 H2
+
+# ── Las Venturas Airport ────────────────────────────────────────────────────────
+# One runway north-south with the apron along its east side: taxiway A runs down the
+# apron, the terminal's stands are off it (planes up to a Nevada's size). The loop
+# west of the runway joins it at both ends and the middle.
+airport LVA Las Venturas Airport
+prefer 0
+runway 18/36 1477.8 1840 9.82 1477.8 1210 9.82 width 34 displaced 18 100
+node R20 1477.8 1230.0 9.82
+node A20 1519.8 1230.0 9.82
+taxi E20 R20 A20
+node R118 1477.8 1328.0 9.82
+node A118 1519.8 1328.0 9.82
+taxi E118 R118 A118
+node R338 1477.8 1548.0 9.82
+node A338 1519.8 1548.0 9.82
+taxi E338 R338 A338
+node R458 1477.8 1668.0 9.82
+node A458 1519.8 1668.0 9.82
+taxi E458 R458 A458
+node R578 1477.8 1788.0 9.82
+node A578 1519.8 1788.0 9.82
+taxi E578 R578 A578
+node A158 1519.8 1368.0 9.82
+gate C1 1553.8 1368.0 9.82 270 span 30 lead A158 push A158
+node A198 1519.8 1408.0 9.82
+gate C2 1553.8 1408.0 9.82 270 span 30 lead A198 push A198
+node A238 1519.8 1448.0 9.82
+gate C3 1553.8 1448.0 9.82 270 span 30 lead A238 push A238
+node A278 1519.8 1488.0 9.82
+gate C4 1553.8 1488.0 9.82 270 span 30 lead A278 push A278
+taxi A A20 A118 A158 A198 A238 A278 A338 A458 A578
+node RN 1477.8 1700.0 9.82
+node RM 1477.8 1464.0 9.82
+node RS 1477.8 1293.0 9.82
+node WN1 1432.8 1748.0 9.82
+node WN 1389.8 1700.0 9.82
+node WM 1389.8 1464.0 9.82
+node WS 1389.8 1293.0 9.82
+node WS1 1432.8 1245.0 9.82
+taxi W RN WN1 WN WM WS WS1 RS
+taxi W2 WM RM
+
+# ── Verdant Meadows ─────────────────────────────────────────────────────────────
+# The dirt strip by the boneyard, for small planes. The hills west of it rise too
+# steeply to land towards them or take off into them: planes land westbound and take
+# off eastbound.
+airport VM Verdant Meadows
+runway 09/27 -95 2502.5 15.48 430 2502.5 15.48 width 50 span 30 noland 09 nodepart 27
+node R200 200 2502.5 15.48
+node R366 366 2502.5 15.48
+gate V1 366 2546 15.48 0 span 25 lead R366 push R366
+gate V2 200 2546 15.48 0 span 25 lead R200 push R200

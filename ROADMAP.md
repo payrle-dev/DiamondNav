@@ -127,7 +127,7 @@ native (or a few) that a script calls on an NPC it already made.
   target (`NAV_CHASE_OVERHEAD`), as a police helicopter does, flying round towers
   taller than 45 m over the target instead of over them. Its own flight model
   (src/flying.cpp, tested in tests/test_flying.cpp): each model's speed, climb and turn
-  rate, leaning into speed changes and banking into turns. Planes and boats are later.
+  rate, leaning into speed changes and banking into turns. Planes came in 1.4; boats are later.
 - 1.3.11: escalators. `navmesh/links.txt` lists ways the walking mesh lacks (an
   escalator's steps are not in GTA's collision): each is walked both ways along its own
   points, and opens what only it reaches (the bake took the Los Santos bank's plaza for a
@@ -145,7 +145,28 @@ native (or a few) that a script calls on an NPC it already made.
   average, with half the reversing and stuck 1.9 to 0.3 s; downtown zig-zag 116 to 109,
   the hills 102 to 96, the freeway 138 to 145 (within its spread).
 
-## 1.4: traffic
+## 1.4: planes (done)
+
+- NPC pilots fly planes gate to gate: `Nav_ParkPlane`, `Nav_TaxiTo`, `Nav_Takeoff`,
+  `Nav_Land`, `Nav_FlyRoute`, and `Nav_FlyTo` / `Nav_Chase` for planes;
+  `OnNavPlanePhase` for each phase of a flight. Pushback, taxiing on paths planned for
+  the plane's turning circle and speed, line-up, the take-off roll and rotation, a
+  climb-out, routes, a pattern onto a final sized to the plane, the glide path, flare,
+  touchdown, braking to the first exit it can make and taxiing to a gate. Each model's
+  size and speeds are its own (src/aircraft.cpp), scaled to San Andreas' runways.
+- Airports as text files (docs/AIRPORTS.md): runways, taxiways, gates, approach and
+  departure fixes, routes. San Andreas' four airports are built in, measured from the
+  game's collision; `navmesh/airports/*.txt` add airports or reshape the stock ones.
+  Planes only use the runways, taxiways and gates their wings fit.
+- Air traffic control (src/atc.cpp): one plane on a runway at a time, holds and
+  go-arounds, departures waiting for arrivals, planes stopping short of each other and
+  of vehicles on the ground and giving way at a taxiway someone is coming along the
+  other way; `Nav_SetRunwayOpen`, `Nav_GetRunwayUser`. In the air they keep clear of
+  each other and of `world.col`.
+- tests/test_aircraft.cpp flies them without a server: departures, arrivals, traffic,
+  ground conflicts, head-on taxiing, terrain, a chase, and every stock gate both ways.
+
+## 1.5: traffic
 
 - **`Nav_Cruise(npcid, speed, flags)`**: a driver drives around the road network on
   its own, picking turns at random (or towards an area), in its lane.
@@ -155,7 +176,7 @@ native (or a few) that a script calls on an NPC it already made.
   - Ends only on `Nav_Stop`, or when the NPC leaves the car.
 - `Nav_DriveTo` gets the same spacing and junction behaviour.
 
-## 1.5: pedestrians
+## 1.6: pedestrians
 
 - **`Nav_Wander(npcid, radius, flags)`**: a ped walks to random points around it,
   preferring sidewalks; the walking navmesh marks road surface as costly (from
