@@ -387,7 +387,11 @@ given.
 **Lines.** `Nav_IsLineClear(x1, y1, z1, x2, y2, z2, kind)` says whether a ped
 (`NAV_MESH_PED`) or a car (`NAV_MESH_CAR`) can go straight between two points on the
 ground: no wall, drop or obstacle. It follows the ground, so it is not an eye-level
-line of sight; drivers use the world's collision (`world.col`) for that.
+line of sight. `Nav_HasLineOfSight(x1, y1, z1, x2, y2, z2)` is: a ray through the
+world's collision (`world.col`) from one point to the other, `NAV_LOS_CLEAR` when no
+building, wall, fence or hill stands between them and `NAV_LOS_BLOCKED` when one does
+(`NAV_LOS_UNKNOWN` without `world.col`). Use it before an NPC shoots, from its chest to
+the target's. It is cheap: a ray only tests the faces in the grid columns it crosses.
 
 **Or take the points.** `Nav_RequestPath` (walking) and `Nav_RequestRoute`
 (driving) return a request id; `OnNavPathResult(requestid, status, points)` follows

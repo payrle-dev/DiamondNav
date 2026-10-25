@@ -115,6 +115,9 @@ native Nav_GetTileCount(kind = NAV_MESH_PED);
 // Road nodes loaded; 0 without a road graph.
 native Nav_GetRoadNodeCount();
 
+// Faces of the world's collision (world.col) loaded; 0 without it.
+native Nav_GetCollisionFaceCount();
+
 // Searches queued or running.
 native Nav_GetPendingCount();
 
@@ -253,9 +256,20 @@ native bool:Nav_GetRandomPoint(&Float:x, &Float:y, &Float:z, kind = NAV_MESH_PED
 // Whether a ped (or a car) can go in a straight line from one point to the other:
 // no wall, drop or obstacle in between. Points are on the ground. Use it to steer,
 // or as a cheap check before an NPC shoots; it follows the ground, so it does not
-// see through windows or over fences (a full line of sight needs the collision
-// mesh: ColAndreas). False when either point is off the navmesh.
+// see over fences or down from a roof (an eye's line of sight is
+// Nav_HasLineOfSight). False when either point is off the navmesh.
 native bool:Nav_IsLineClear(Float:x1, Float:y1, Float:z1, Float:x2, Float:y2, Float:z2, kind = NAV_MESH_PED);
+
+// Whether nothing solid in the world's collision (world.col: buildings, walls, fences,
+// the ground) stands between two points: an eye's line of sight, through the air, unlike
+// Nav_IsLineClear. Give the points at eye or chest height (a ped's position is about a
+// metre above its feet). NAV_LOS_UNKNOWN without world.col: the script falls back on
+// Nav_IsLineClear or distance. Small props cars smash through (lamp posts, bins) and
+// vehicles are not in world.col, so they never block it.
+#define NAV_LOS_UNKNOWN         (-1)
+#define NAV_LOS_BLOCKED         (0)
+#define NAV_LOS_CLEAR           (1)
+native Nav_HasLineOfSight(Float:x1, Float:y1, Float:z1, Float:x2, Float:y2, Float:z2);
 
 // The nearest road node, within `reach` metres (flags: NAV_ROAD_*).
 native bool:Nav_GetNearestRoadPoint(Float:x, Float:y, Float:z, &Float:outX, &Float:outY, &Float:outZ,

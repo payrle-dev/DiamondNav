@@ -1326,6 +1326,17 @@ public:
 
     bool isMoving(int npcid) const { return movers_.count(npcid) != 0 || flyers_.count(npcid) != 0; }
 
+    // Nav_HasLineOfSight: whether any face of world.col lies between a and b (an eye's
+    // line, unlike the navmesh's lines along the ground). -1 without world.col.
+    int lineOfSight(const Vector3& a, const Vector3& b) const
+    {
+        if (!world_.loaded()) return -1;
+        dnav::RayHit hit;
+        return world_.ray({ a.x, a.y, a.z }, { b.x, b.y, b.z }, hit) ? 0 : 1;
+    }
+
+    int collisionFaces() const { return static_cast<int>(world_.triangleCount()); }
+
     void tell(void* owner, int npcid, MoveEnd why)
     {
         if (!owner || !pawn_) return;
@@ -2617,6 +2628,11 @@ SCRIPT_API(Nav_GetRoadNodeCount, int())
     return DiamondNav::instance ? static_cast<int>(DiamondNav::instance->finder.roads().nodeCount()) : 0;
 }
 
+SCRIPT_API(Nav_GetCollisionFaceCount, int())
+{
+    return DiamondNav::instance ? DiamondNav::instance->collisionFaces() : 0;
+}
+
 SCRIPT_API(Nav_GetPendingCount, int())
 {
     return DiamondNav::instance ? static_cast<int>(DiamondNav::instance->finder.pending()) : 0;
@@ -2681,6 +2697,11 @@ SCRIPT_API(Nav_IsLineClear, bool(float x1, float y1, float z1, float x2, float y
 {
     return DiamondNav::instance
         && DiamondNav::instance->finder.lineClear(dnav::Point { x1, y1, z1 }, dnav::Point { x2, y2, z2 }, meshKind(kind));
+}
+
+SCRIPT_API(Nav_HasLineOfSight, int(float x1, float y1, float z1, float x2, float y2, float z2))
+{
+    return DiamondNav::instance ? DiamondNav::instance->lineOfSight(Vector3(x1, y1, z1), Vector3(x2, y2, z2)) : -1;
 }
 
 SCRIPT_API(Nav_GetNearestRoadPoint, bool(float x, float y, float z, float& outX, float& outY, float& outZ, float reach, int flags))
