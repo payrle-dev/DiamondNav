@@ -520,9 +520,15 @@ bool Pilot::planTaxi(PilotEnv& env, int goalGate, int goalNode, bool fromGateAll
     }
     for (const Vec3& p : taxiPoints(env, route, *a)) pts.push_back(p);
     if (toGate >= 0) {
-        // Nose in, straight for its last stretch.
+        // Nose in, straight for its last stretch: from a point on the gate's line, no
+        // further back than the lead node is (or the path would double back past it).
         const Gate& gt = a->gates[toGate];
-        pts.push_back(add(gt.p, forwardOf(gt.heading), -(spec.taxiRadius + spec.length * 0.5f)));
+        const Vec3 fwd = forwardOf(gt.heading);
+        const Vec3& lead = pts.back();
+        const float back = (gt.p.x - lead.x) * fwd.x + (gt.p.y - lead.y) * fwd.y;
+        const float side = std::fabs((gt.p.x - lead.x) * fwd.y - (gt.p.y - lead.y) * fwd.x);
+        if (back < spec.length * 0.5f || side > 2.0f)
+            pts.push_back(add(gt.p, fwd, -std::min(spec.taxiRadius + spec.length * 0.5f, std::max(back, spec.length * 0.5f))));
         pts.push_back(gt.p);
     }
     const float v0 = push.empty() ? st.speed : 0.0f;
