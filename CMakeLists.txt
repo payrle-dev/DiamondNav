@@ -17,7 +17,7 @@
 # and Recast/Detour v1.6.0.
 
 cmake_minimum_required(VERSION 3.19)
-project(DiamondNav LANGUAGES C CXX VERSION 1.3.12)
+project(DiamondNav LANGUAGES C CXX VERSION 1.4.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -62,7 +62,15 @@ target_include_directories(dnav_detour PUBLIC ${recast_SOURCE_DIR}/Detour/Includ
 target_compile_definitions(dnav_detour PUBLIC DT_POLYREF64=1)
 
 # What the baker and the component share: the .nav file, the settings and the search.
-add_library(dnav_common STATIC src/navfile.cpp src/pathfinder.cpp src/roads.cpp src/driving.cpp src/collision.cpp src/flying.cpp)
+# The built-in airports (airports/gta_sa.txt), compiled in as bytes.
+file(READ ${CMAKE_CURRENT_SOURCE_DIR}/airports/gta_sa.txt DNAV_GTA_AIRPORTS HEX)
+string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," DNAV_GTA_AIRPORTS "${DNAV_GTA_AIRPORTS}")
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/airports_gta.cpp
+    "// Made by CMake from airports/gta_sa.txt.\nnamespace dnav {\nstatic const unsigned char gtaSa[] = { ${DNAV_GTA_AIRPORTS} 0 };\nextern const char* const AIRPORTS_GTA_SA = reinterpret_cast<const char*>(gtaSa);\n}\n")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/airports/gta_sa.txt)
+
+add_library(dnav_common STATIC src/navfile.cpp src/pathfinder.cpp src/roads.cpp src/driving.cpp src/collision.cpp src/flying.cpp
+    src/aircraft.cpp src/airports.cpp src/atc.cpp src/pilot.cpp ${CMAKE_CURRENT_BINARY_DIR}/airports_gta.cpp)
 target_include_directories(dnav_common PUBLIC src)
 find_package(Threads REQUIRED)
 target_link_libraries(dnav_common PUBLIC dnav_detour Threads::Threads)
@@ -115,9 +123,12 @@ if(DNAV_TESTS)
     add_executable(dnav_flying_tests tests/test_flying.cpp)
     target_link_libraries(dnav_flying_tests PRIVATE dnav_common)
     add_test(NAME flying COMMAND dnav_flying_tests)
+    add_executable(dnav_aircraft_tests tests/test_aircraft.cpp)
+    target_link_libraries(dnav_aircraft_tests PRIVATE dnav_common)
+    add_test(NAME aircraft COMMAND dnav_aircraft_tests)
     if(MSVC)
         # The static runtime, as dnav_common is built with.
-        set_property(TARGET dnav_tests dnav_driving_tests dnav_collision_tests dnav_flying_tests PROPERTY
+        set_property(TARGET dnav_tests dnav_driving_tests dnav_collision_tests dnav_flying_tests dnav_aircraft_tests PROPERTY
             MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     endif()
 endif()
