@@ -20,13 +20,19 @@
 #include <chrono>
 #include <cmath>
 #include <fstream>
+#include <map>
 #include <thread>
 #include <unordered_map>
 
 #include "collision.hpp"
 #include "driving.hpp"
+#include "airports.hpp"
+#include "atc.hpp"
 #include "flying.hpp"
 #include "pathfinder.hpp"
+#include "pilot.hpp"
+
+#include <filesystem>
 
 #ifndef DNAV_VERSION_MAJOR
     #define DNAV_VERSION_MAJOR 1
@@ -344,6 +350,30 @@ struct Traffic {
     Shape shape;
 };
 
+// Planes.
+constexpr float PLANE_DT_MAX = 0.1f;        // s: a longer gap between ticks flies as this
+constexpr float PLANE_MOVED = 5.0f;         // m: something else moved the plane this far: it goes on from there
+constexpr float PLANE_GROUND = 2.5f;        // m over its wheels' height: still on the ground
+constexpr float PLANE_SEE_EVERY = 0.25f;    // s between looking at what stands on the airports
+constexpr float PLANE_TOP_CELL = 10.0f;     // m: the ground's height is kept for cells this big
+constexpr size_t PLANE_TOP_KEEP = 400000;   // cells kept before they are all forgotten
+constexpr char AIRPORTS_FOLDER[] = "airports";
+// Nav_Land's gate for "none, stop once off the runway".
+constexpr char NO_GATE[] = "-";
+
+// An NPC flying a plane: its pilot (pilot.hpp) does everything from the gate on.
+struct Plane {
+    void* owner = nullptr;              // the script told how its orders end
+    dnav::Pilot pilot;
+    Vector3 placed {};                  // where it was put last
+    int gear = -1;                      // the gear state set last
+    bool busy = false;                  // an order is under way (a new one ends it STOPPED)
+    explicit Plane(int id, int model)
+        : pilot(id, model)
+    {
+    }
+};
+
 // An NPC flying a helicopter (Nav_FlyTo, or Nav_Chase in one).
 struct Flyer {
     void* owner = nullptr;              // the script told when it ends
@@ -399,6 +429,7 @@ public:
         }
         loadVehicles();
         loadCollision();
+        loadAirports();
         if (world_.loaded() && finder.meshLoaded(dnav::MeshKind::Car)) {
             float secs = 0.0f;
             const int n = finder.addLedges(world_, secs);
@@ -427,6 +458,33 @@ public:
         } else {
             core_->logLn(LogLevel::Error, "[nav] %s", error.c_str());
         }
+    }
+
+    // The built-in airports (airports_gta.cpp: San Andreas' own, unless navmesh/airports
+    // has a gta_sa.txt of its own), then navmesh/airports/*.txt in name order.
+    void loadAirports()
+    {
+        namespace fs = std::filesystem;
+        const fs::path dir = fs::path(NAV_FOLDER) / AIRPORTS_FOLDER;
+        std::vector<fs::path> files;
+        std::error_code ec;
+        if (fs::is_directory(dir, ec)) {
+            for (const auto& e : fs::directory_iterator(dir, ec))
+                if (e.is_regular_file() && e.path().extension() == ".txt") files.push_back(e.path());
+        }
+        std::sort(files.begin(), files.end());
+        std::string error;
+        bool ownGta = false;
+        for (const auto& f : files)
+            if (f.filename() == "gta_sa.txt") ownGta = true;
+        if (!ownGta && !airports_.loadText(dnav::AIRPORTS_GTA_SA, "built-in gta_sa.txt", error))
+            core_->logLn(LogLevel::Error, "[nav] %s", error.c_str());
+        for (const auto& f : files) {
+            if (!airports_.loadFile(f.string(), error)) core_->logLn(LogLevel::Error, "[nav] %s", error.c_str());
+        }
+        atc_.setDb(&airports_);
+        core_->printLn("[nav] %d airports, %d flight routes (%d airport files)", airports_.liveCount(),
+            static_cast<int>(airports_.routeCount()), static_cast<int>(files.size()));
     }
 
     void loadCollision()
@@ -478,10 +536,13 @@ public:
             if (m.owner == amx) m.owner = nullptr;
         for (auto& [id, f] : flyers_)
             if (f.owner == amx) f.owner = nullptr;
+        for (auto& [id, p] : planes_)
+            if (p.owner == amx) p.owner = nullptr;
     }
 
     void onTick(Microseconds, TimePoint now) override
     {
+        if (!planes_.empty()) planesStep(now);
         // Helicopters fly (ids first: arriving or losing the target ends a flight).
         thinking_.clear();
         for (const auto& [id, f] : flyers_) thinking_.push_back(id);
@@ -1298,6 +1359,23 @@ public:
     // Ends npc's walk or drive, if it has one, and tells its script why.
     void end(int npcid, MoveEnd why, bool stopNpc)
     {
+        auto pl = planes_.find(npcid);
+        if (pl != planes_.end()) {
+            void* owner = pl->second.owner;
+            if (why == END_STOPPED && stopNpc) {
+                // Nav_Stop: it circles where it is, or stops on the ground, still flown.
+                dnav::PilotEnv env = planeEnv();
+                pl->second.pilot.stop(env);
+                pl->second.pilot.ended = -1;
+                pl->second.busy = false;
+            } else {
+                dnav::PilotEnv env = planeEnv();
+                pl->second.pilot.forget(env);
+                planes_.erase(pl);
+            }
+            tell(owner, npcid, why);
+            return;
+        }
         auto fl = flyers_.find(npcid);
         if (fl != flyers_.end()) {
             void* owner = fl->second.owner;
@@ -1324,7 +1402,26 @@ public:
         }
     }
 
-    bool isMoving(int npcid) const { return movers_.count(npcid) != 0 || flyers_.count(npcid) != 0; }
+    bool isMoving(int npcid) const
+    {
+        auto pl = planes_.find(npcid);
+        if (pl != planes_.end()) {
+            const dnav::PlanePhase ph = pl->second.pilot.phase();
+            return ph != dnav::PlanePhase::Parked && ph != dnav::PlanePhase::AtGate && ph != dnav::PlanePhase::None;
+        }
+        return movers_.count(npcid) != 0 || flyers_.count(npcid) != 0;
+    }
+
+    // Nav_HasLineOfSight: whether any face of world.col lies between a and b (an eye's
+    // line, unlike the navmesh's lines along the ground). -1 without world.col.
+    int lineOfSight(const Vector3& a, const Vector3& b) const
+    {
+        if (!world_.loaded()) return -1;
+        dnav::RayHit hit;
+        return world_.ray({ a.x, a.y, a.z }, { b.x, b.y, b.z }, hit) ? 0 : 1;
+    }
+
+    int collisionFaces() const { return static_cast<int>(world_.triangleCount()); }
 
     void tell(void* owner, int npcid, MoveEnd why)
     {
@@ -1360,6 +1457,16 @@ public:
     // Nav_GetDriveInfo: how a driver is doing right now.
     bool driveInfo(int npcid, float& speed, float& want, dnav::RoadClass& cls, float& limit, bool& reversing) const
     {
+        auto pl = planes_.find(npcid);
+        if (pl != planes_.end()) {
+            const dnav::Pilot& p = pl->second.pilot;
+            speed = p.st.speed;
+            want = p.st.speed;
+            cls = dnav::RoadClass::Street;
+            limit = p.spec.cruise;
+            reversing = p.phase() == dnav::PlanePhase::Pushback;
+            return true;
+        }
         auto fl = flyers_.find(npcid);
         if (fl != flyers_.end()) {
             const dnav::Flight& f = fl->second.flight;
@@ -2041,6 +2148,12 @@ public:
 
     bool chase(AMX* amx, int npcid, int quarry, float speed, float carZ, int flags)
     {
+        if (isPlaneNpc(npcid)) {
+            if (!core_->getPlayers().get(quarry)) return false;
+            return planeOrder(amx, npcid, [&](Plane& p, dnav::PilotEnv& env) {
+                return p.pilot.chase(env, quarry, speed > 0.0f ? speed * SPEED_UNIT : 0.0f, carZ > 0.0f ? carZ : 0.0f);
+            });
+        }
         INPC* npc = npcs_ ? npcs_->get(npcid) : nullptr;
         if (!npc || !npc->getVehicle() || npc->getVehicleSeat() != 0) return false;
         if (carZ <= 0.0f) carZ = rideHeight(npc->getVehicle()->getModel());
@@ -2082,6 +2195,12 @@ public:
         m.style = styleOf(npcid, true);
         movers_[npcid] = std::move(m);
         return true;
+    }
+
+    bool isPlaneNpc(int npcid) const
+    {
+        INPC* npc = npcs_ ? npcs_->get(npcid) : nullptr;
+        return npc && npc->getVehicle() && npc->getVehicleSeat() == 0 && dnav::isPlane(npc->getVehicle()->getModel());
     }
 
     // ── Helicopters ──────────────────────────────────────────────────────────
@@ -2137,6 +2256,10 @@ public:
 
     bool flyTo(AMX* amx, int npcid, const Vector3& to, float speed, int flags)
     {
+        if (isPlaneNpc(npcid))
+            return planeOrder(amx, npcid, [&](Plane& p, dnav::PilotEnv& env) {
+                return p.pilot.fly(env, { dv(to) }, speed > 0.0f ? speed * SPEED_UNIT : 0.0f, false);
+            });
         INPC* npc = npcs_ ? npcs_->get(npcid) : nullptr;
         if (!npc || !npc->getVehicle() || npc->getVehicleSeat() != 0) return false;
         if (!dnav::isHelicopter(npc->getVehicle()->getModel())) return false;
@@ -2198,6 +2321,226 @@ public:
         npc->setVehiclePosition(f.placed, false);
         npc->setVehicleRotation(GTAQuat(Vector3(fl.pitch, fl.roll, fl.heading)), false);
         if (there && f.quarry < 0) end(npcid, END_ARRIVED, true);
+    }
+
+    // ── Planes ───────────────────────────────────────────────────────────────
+
+    // What a plane knows of the world: the highest face at (x, y) (never under the
+    // sea), kept by cell, since planes look a long way ahead every half second.
+    dnav::FlyWorld planeWorld()
+    {
+        dnav::FlyWorld w;
+        if (!world_.loaded()) return w;
+        w.top = [this](float x, float y) {
+            const long long kx = static_cast<long long>(std::floor(x / PLANE_TOP_CELL));
+            const long long ky = static_cast<long long>(std::floor(y / PLANE_TOP_CELL));
+            const long long key = (kx << 32) ^ (ky & 0xffffffffLL);
+            auto it = tops_.find(key);
+            if (it != tops_.end()) return it->second;
+            if (tops_.size() > PLANE_TOP_KEEP) tops_.clear();
+            const float cx = (static_cast<float>(kx) + 0.5f) * PLANE_TOP_CELL;
+            const float cy = (static_cast<float>(ky) + 0.5f) * PLANE_TOP_CELL;
+            dnav::RayHit hit;
+            float t = HELI_SEA;
+            if (world_.ray({ cx, cy, 1500.0f }, { cx, cy, -200.0f }, hit)) t = std::max(hit.at.z, HELI_SEA);
+            tops_[key] = t;
+            return t;
+        };
+        w.ray = [this](const dnav::Vec3& a, const dnav::Vec3& b, float& t) {
+            dnav::RayHit hit;
+            if (!world_.ray(a, b, hit)) return false;
+            t = hit.t;
+            return true;
+        };
+        return w;
+    }
+
+    dnav::PilotEnv planeEnv()
+    {
+        dnav::PilotEnv env;
+        env.db = &airports_;
+        env.atc = &atc_;
+        env.world = planeWorld();
+        env.now = clock_;
+        for (const auto& [id, p] : planes_) env.others.push_back(&p.pilot);
+        env.target = [this](int who, dnav::Vec3& pos, dnav::Vec3& vel) {
+            IPlayer* t = core_->getPlayers().get(who);
+            if (!t) return false;
+            Vector3 tp, tv;
+            whereIs(*t, tp, tv);
+            pos = dv(tp);
+            vel = dv(tv * VELOCITY_UNIT);
+            return true;
+        };
+        return env;
+    }
+
+    // A model's size from vehicles.dnv (its collision, wings and all), where it has one
+    // that looks like the plane's; its ride height from its wheels.
+    void sizePlane(dnav::PlaneSpec& spec, int model) const
+    {
+        if (const dnav::Handling* h = drivingModel.fromFile(model)) {
+            if (h->width > spec.span * 0.6f && h->width < spec.span * 1.6f) spec.span = h->width;
+            if (h->length > spec.length * 0.6f && h->length < spec.length * 1.6f) spec.length = h->length;
+            if (h->ride > 0.3f) spec.ride = h->ride;
+        }
+    }
+
+    // A plane put somewhere (or taken over where it is): on the ground if its wheels
+    // are, parked at a gate if it stands on one, else flying on as it was going.
+    void placePlane(Plane& p, IVehicle& v)
+    {
+        dnav::PilotEnv env = planeEnv();
+        const Vector3 pos = v.getPosition();
+        const float heading = v.getRotation().ToEuler().z;
+        float ground = 0.0f;
+        const bool onGround = groundUnder(pos.x, pos.y, pos.z, ground) && pos.z - ground < p.pilot.spec.ride + PLANE_GROUND;
+        const float speed = glm::length(v.getVelocity()) * VELOCITY_UNIT;
+        p.pilot.place(env, dv(pos), heading, onGround, speed);
+        p.placed = pos;
+        if (!onGround) return;
+        const int ap = airports_.at(dv(pos), 50.0f);
+        const dnav::Airport* a = airports_.get(ap);
+        for (size_t g = 0; a && g < a->gates.size(); g++) {
+            const dnav::Gate& gt = a->gates[g];
+            if (gt.removed || glm::distance(Vector2(pos), Vector2(gt.p.x, gt.p.y)) > 6.0f) continue;
+            if (std::fabs(dnav::wrapDeg(gt.heading - heading)) > 30.0f) continue;
+            if (p.pilot.park(env, ap, static_cast<int>(g))) {
+                const dnav::Vec3& at = p.pilot.st.pos;
+                p.placed = Vector3(at.x, at.y, at.z);
+            }
+            break;
+        }
+    }
+
+    // The pilot of the plane npc flies (made the first time it is given an order).
+    Plane* planeOf(AMX* amx, int npcid)
+    {
+        INPC* npc = npcs_ ? npcs_->get(npcid) : nullptr;
+        IVehicle* v = npc ? npc->getVehicle() : nullptr;
+        if (!npc || !v || npc->getVehicleSeat() != 0 || !dnav::isPlane(v->getModel())) return nullptr;
+        auto it = planes_.find(npcid);
+        if (it == planes_.end()) {
+            end(npcid, END_STOPPED, false);
+            if (npc->isMoving()) npc->stopMove();
+            it = planes_.emplace(npcid, Plane(npcid, v->getModel())).first;
+            sizePlane(it->second.pilot.spec, v->getModel());
+            placePlane(it->second, *v);
+        } else if (glm::distance(v->getPosition(), it->second.placed) > PLANE_MOVED) {
+            placePlane(it->second, *v);
+        }
+        return &it->second;
+    }
+
+    // Gives the plane npc an order (`order` says false, with the pilot's why, if it
+    // cannot). An order it was on ends STOPPED.
+    template <typename F>
+    bool planeOrder(AMX* amx, int npcid, F order)
+    {
+        Plane* p = planeOf(amx, npcid);
+        if (!p) return false;
+        dnav::PilotEnv env = planeEnv();
+        const bool was = p->busy;
+        void* wasOwner = p->owner;
+        p->pilot.why.clear();
+        if (!order(*p, env)) {
+            core_->printLn("[nav] plane %d: %s", npcid, p->pilot.why.c_str());
+            return false;
+        }
+        p->owner = amx;
+        p->busy = true;
+        if (was) tell(wasOwner, npcid, END_STOPPED);
+        return true;
+    }
+
+    // What stands on and round the airports that no pilot flies: a car on a runway
+    // closes it, anything on a taxiway stops planes short of it.
+    void seeAirports()
+    {
+        obstacles_.clear();
+        if (!vehicles_ || airports_.liveCount() == 0) return;
+        std::unordered_map<int, bool> flown;
+        for (const auto& [id, p] : planes_) {
+            INPC* npc = npcs_ ? npcs_->get(id) : nullptr;
+            if (npc && npc->getVehicle()) flown[npc->getVehicle()->getID()] = true;
+        }
+        for (IVehicle* v : *vehicles_) {
+            if (flown.count(v->getID())) continue;
+            const Vector3 pos = v->getPosition();
+            const int ap = airports_.at(dv(pos), 100.0f);
+            const dnav::Airport* a = airports_.get(ap);
+            if (!a || pos.z > a->hi.z + 15.0f) continue;
+            dnav::Obstacle o;
+            o.pos = dv(pos);
+            o.vel = dv(v->getVelocity() * VELOCITY_UNIT);
+            o.vehicle = v->getID();
+            const int model = v->getModel();
+            o.radius = dnav::isPlane(model) ? dnav::PlaneSpec::of(model).span * 0.5f : std::max(shapeOf(model).hl, shapeOf(model).hw);
+            // Its centre over the ground, as the pilots' poses are on the ground.
+            o.pos.z -= rideHeight(model);
+            obstacles_.push_back(o);
+        }
+    }
+
+    void callPhase(void* owner, int npcid, dnav::PlanePhase phase)
+    {
+        if (!owner || !pawn_) return;
+        if (IPawnScript* script = pawn_->getScript(static_cast<AMX*>(owner)))
+            script->Call("OnNavPlanePhase", DefaultReturnValue_False, npcid, static_cast<int>(phase));
+    }
+
+    // Every plane one step on, in id order (ATC answers whoever asks first).
+    void planesStep(TimePoint now)
+    {
+        const float dt = planeLast_ == TimePoint {} ? 0.0f
+            : std::min(PLANE_DT_MAX, duration_cast<Microseconds>(now - planeLast_).count() / 1e6f);
+        planeLast_ = now;
+        if (dt <= 0.0f) return;
+        clock_ += dt;
+        seeIn_ -= dt;
+        if (seeIn_ <= 0.0f) {
+            seeIn_ = PLANE_SEE_EVERY;
+            seeAirports();
+        }
+        atc_.update(airports_, obstacles_, clock_);
+        dnav::PilotEnv env = planeEnv();
+        planeIds_.clear();
+        for (const auto& [id, p] : planes_) planeIds_.push_back(id);
+        for (int id : planeIds_) {
+            auto it = planes_.find(id);
+            if (it == planes_.end()) continue;
+            Plane& p = it->second;
+            INPC* npc = npcs_ ? npcs_->get(id) : nullptr;
+            IVehicle* v = npc ? npc->getVehicle() : nullptr;
+            if (!npc || !v || npc->getVehicleSeat() != 0) {
+                end(id, END_INTERRUPTED, false);
+                continue;
+            }
+            if (glm::distance(v->getPosition(), p.placed) > PLANE_MOVED) placePlane(p, *v);
+            p.pilot.step(env, dt);
+            const dnav::PlaneState& s = p.pilot.st;
+            const dnav::Vec3 vel = p.pilot.velocity();
+            p.placed = Vector3(s.pos.x, s.pos.y, s.pos.z);
+            // Not an NPC move: its position, rotation and velocity are set as they are
+            // (as a helicopter's), and its driver sync carries them.
+            npc->setVelocity(Vector3(vel.x, vel.y, vel.z) / VELOCITY_UNIT, false);
+            npc->setVehiclePosition(p.placed, false);
+            npc->setVehicleRotation(GTAQuat(Vector3(s.pitch, s.bank, s.heading)), false);
+            const int gear = s.gearDown ? 0 : 1;
+            if (gear != p.gear) {
+                npc->setVehicleGearState(gear);
+                p.gear = gear;
+            }
+            // What happened, told last: a callback may give it a new order, or destroy it.
+            std::vector<dnav::PlanePhase> phases;
+            phases.swap(p.pilot.phases);
+            const int ended = p.pilot.ended;
+            p.pilot.ended = -1;
+            if (ended >= 0) p.busy = false;
+            void* owner = p.owner;
+            for (dnav::PlanePhase ph : phases) callPhase(owner, id, ph);
+            if (ended >= 0) tell(owner, id, static_cast<MoveEnd>(ended));
+        }
     }
 
     // Where a player is and how fast they go (in their car, if they are in one).
@@ -2553,6 +2896,9 @@ public:
             npcs_ = nullptr;
             movers_.clear();
             flyers_.clear();
+            planes_.clear();
+            atc_ = dnav::Atc {};
+            atc_.setDb(&airports_);
             byRequest_.clear();
         }
     }
@@ -2561,6 +2907,9 @@ public:
     {
         movers_.clear();
         flyers_.clear();
+        planes_.clear();
+        atc_ = dnav::Atc {};
+        atc_.setDb(&airports_);
         byRequest_.clear();
     }
 
@@ -2580,6 +2929,19 @@ private:
     std::vector<int> thinking_;
     std::unordered_map<int, Mover> movers_;     // npc id -> its walk or drive
     std::unordered_map<int, Flyer> flyers_;     // npc id -> its flight
+    std::map<int, Plane> planes_;               // npc id -> its pilot (in id order: ATC asks in turn)
+    std::vector<int> planeIds_;
+    std::unordered_map<long long, float> tops_; // the ground's height, by cell (planes)
+    float clock_ = 0.0f;                        // s the planes have flown (ATC's clock)
+    float seeIn_ = 0.0f;
+    TimePoint planeLast_ {};
+    std::vector<dnav::Obstacle> obstacles_;
+
+public:
+    dnav::Airports airports_;
+    dnav::Atc atc_;
+    const std::map<int, Plane>& planes() const { return planes_; }
+    void logError(const std::string& e) { core_->logLn(LogLevel::Error, "[nav] %s", e.c_str()); }
     std::unordered_map<int, int> byRequest_;    // request id -> npc id
 };
 
@@ -2615,6 +2977,11 @@ SCRIPT_API(Nav_GetTileCount, int(int kind))
 SCRIPT_API(Nav_GetRoadNodeCount, int())
 {
     return DiamondNav::instance ? static_cast<int>(DiamondNav::instance->finder.roads().nodeCount()) : 0;
+}
+
+SCRIPT_API(Nav_GetCollisionFaceCount, int())
+{
+    return DiamondNav::instance ? DiamondNav::instance->collisionFaces() : 0;
 }
 
 SCRIPT_API(Nav_GetPendingCount, int())
@@ -2681,6 +3048,11 @@ SCRIPT_API(Nav_IsLineClear, bool(float x1, float y1, float z1, float x2, float y
 {
     return DiamondNav::instance
         && DiamondNav::instance->finder.lineClear(dnav::Point { x1, y1, z1 }, dnav::Point { x2, y2, z2 }, meshKind(kind));
+}
+
+SCRIPT_API(Nav_HasLineOfSight, int(float x1, float y1, float z1, float x2, float y2, float z2))
+{
+    return DiamondNav::instance ? DiamondNav::instance->lineOfSight(Vector3(x1, y1, z1), Vector3(x2, y2, z2)) : -1;
 }
 
 SCRIPT_API(Nav_GetNearestRoadPoint, bool(float x, float y, float z, float& outX, float& outY, float& outZ, float reach, int flags))
@@ -2868,5 +3240,251 @@ SCRIPT_API(Nav_GetDriveInfo, bool(int npcid, float& speedKmh, float& wantKmh, in
     roadClass = static_cast<int>(cls);
     limitKmh = limit * KMH;
     reversing = back;
+    return true;
+}
+
+// ── Planes ───────────────────────────────────────────────────────────────────
+
+namespace {
+
+DiamondNav* nav()
+{
+    return DiamondNav::instance;
+}
+
+const dnav::Airport* airportNamed(const std::string& code, int* index = nullptr)
+{
+    if (!nav()) return nullptr;
+    const int i = nav()->airports_.find(code);
+    if (index) *index = i;
+    return nav()->airports_.get(i);
+}
+
+// A route by name, or none for "" (false: there is no such route).
+bool routeNamed(const std::string& name, std::vector<dnav::Vec3>& out)
+{
+    out.clear();
+    if (name.empty()) return true;
+    const dnav::FlightRoute* r = nav()->airports_.route(name);
+    if (!r) return false;
+    out = r->points;
+    return true;
+}
+
+} // namespace
+
+SCRIPT_API(Nav_ParkPlane, bool(int npcid, std::string const& airport, std::string const& gate))
+{
+    int ap = -1;
+    const dnav::Airport* a = airportNamed(airport, &ap);
+    if (!a) return false;
+    const int g = a->gate(gate);
+    if (g < 0) return false;
+    return nav()->planeOrder(GetAMX(), npcid, [&](Plane& p, dnav::PilotEnv& env) {
+        if (!p.pilot.park(env, ap, g)) return false;
+        p.pilot.ended = static_cast<int>(dnav::PilotEnd::Arrived);
+        return true;
+    });
+}
+
+SCRIPT_API(Nav_TaxiTo, bool(int npcid, std::string const& where))
+{
+    if (!nav()) return false;
+    return nav()->planeOrder(GetAMX(), npcid, [&](Plane& p, dnav::PilotEnv& env) {
+        const dnav::Airport* a = env.db->get(p.pilot.airport());
+        if (!a) {
+            p.pilot.why = "it is not at an airport";
+            return false;
+        }
+        const int g = a->gate(where), n = g < 0 ? a->node(where) : -1;
+        if (g < 0 && n < 0) {
+            p.pilot.why = "no gate or taxi node '" + where + "' at " + a->code;
+            return false;
+        }
+        return p.pilot.taxiTo(env, g, n);
+    });
+}
+
+SCRIPT_API(Nav_Takeoff, bool(int npcid, std::string const& runway, std::string const& route))
+{
+    if (!nav()) return false;
+    std::vector<dnav::Vec3> after;
+    if (!routeNamed(route, after)) return false;
+    return nav()->planeOrder(GetAMX(), npcid, [&](Plane& p, dnav::PilotEnv& env) { return p.pilot.takeoff(env, runway, after); });
+}
+
+SCRIPT_API(Nav_Land, bool(int npcid, std::string const& airport, std::string const& gate, std::string const& runway, std::string const& via))
+{
+    int ap = -1;
+    const dnav::Airport* a = airportNamed(airport, &ap);
+    if (!a) return false;
+    int g = -1;
+    if (gate == NO_GATE) g = -2;
+    else if (!gate.empty() && (g = a->gate(gate)) < 0) return false;
+    std::vector<dnav::Vec3> way;
+    if (!routeNamed(via, way)) return false;
+    return nav()->planeOrder(GetAMX(), npcid, [&](Plane& p, dnav::PilotEnv& env) { return p.pilot.land(env, ap, runway, g, way); });
+}
+
+SCRIPT_API(Nav_FlyRoute, bool(int npcid, std::string const& route, float speed, bool loop))
+{
+    if (!nav()) return false;
+    std::vector<dnav::Vec3> pts;
+    if (route.empty() || !routeNamed(route, pts)) return false;
+    return nav()->planeOrder(GetAMX(), npcid, [&](Plane& p, dnav::PilotEnv& env) {
+        return p.pilot.fly(env, pts, speed > 0.0f ? speed * SPEED_UNIT : 0.0f, loop);
+    });
+}
+
+SCRIPT_API(Nav_GetPlanePhase, int(int npcid))
+{
+    if (!nav()) return -1;
+    auto it = nav()->planes().find(npcid);
+    return it == nav()->planes().end() ? -1 : static_cast<int>(it->second.pilot.phase());
+}
+
+SCRIPT_API(Nav_GetPlaneInfo, bool(int npcid, int& phase, float& speedKmh, float& toTouchdown, int& airport, int& gate))
+{
+    if (!nav()) return false;
+    auto it = nav()->planes().find(npcid);
+    if (it == nav()->planes().end()) return false;
+    const dnav::Pilot& p = it->second.pilot;
+    phase = static_cast<int>(p.phase());
+    speedKmh = p.st.speed * KMH;
+    toTouchdown = p.toTouchdown();
+    airport = p.airport();
+    gate = p.gate();
+    return true;
+}
+
+SCRIPT_API(Nav_GetPlanePhaseName, bool(int phase, OutputOnlyString& name))
+{
+    if (phase < 0 || phase > static_cast<int>(dnav::PlanePhase::Loiter)) return false;
+    name = StringView(dnav::phaseName(static_cast<dnav::PlanePhase>(phase)));
+    return true;
+}
+
+SCRIPT_API(Nav_GetAirportCount, int())
+{
+    return nav() ? static_cast<int>(nav()->airports_.count()) : 0;
+}
+
+SCRIPT_API(Nav_FindAirport, int(std::string const& code))
+{
+    return nav() ? nav()->airports_.find(code) : -1;
+}
+
+SCRIPT_API(Nav_GetAirportAt, int(float x, float y, float z))
+{
+    return nav() ? nav()->airports_.at({ x, y, z }, 50.0f) : -1;
+}
+
+SCRIPT_API(Nav_GetAirportCode, bool(int index, OutputOnlyString& code))
+{
+    const dnav::Airport* a = nav() ? nav()->airports_.get(index) : nullptr;
+    if (!a) return false;
+    code = StringView(a->code);
+    return true;
+}
+
+SCRIPT_API(Nav_GetGateSpot, bool(std::string const& airport, std::string const& gate, float& x, float& y, float& z, float& heading))
+{
+    const dnav::Airport* a = airportNamed(airport);
+    const int g = a ? a->gate(gate) : -1;
+    if (g < 0) return false;
+    const dnav::Gate& gt = a->gates[g];
+    x = gt.p.x;
+    y = gt.p.y;
+    z = gt.p.z;
+    heading = gt.heading;
+    return true;
+}
+
+SCRIPT_API(Nav_IsGateFree, bool(std::string const& airport, std::string const& gate))
+{
+    int ap = -1;
+    const dnav::Airport* a = airportNamed(airport, &ap);
+    const int g = a ? a->gate(gate) : -1;
+    return g >= 0 && nav()->atc_.gateFree(ap, g);
+}
+
+// A free gate a model fits at an airport (the smallest that fits).
+SCRIPT_API(Nav_FindFreeGate, bool(std::string const& airport, int model, OutputOnlyString& gate))
+{
+    int ap = -1;
+    const dnav::Airport* a = airportNamed(airport, &ap);
+    if (!a) return false;
+    const float span = dnav::PlaneSpec::of(model).span;
+    int best = -1;
+    for (size_t g = 0; g < a->gates.size(); g++) {
+        const dnav::Gate& gt = a->gates[g];
+        if (gt.removed || gt.span < span || !nav()->atc_.gateFree(ap, static_cast<int>(g))) continue;
+        if (best < 0 || gt.span < a->gates[best].span) best = static_cast<int>(g);
+    }
+    if (best < 0) return false;
+    gate = StringView(a->gates[best].name);
+    return true;
+}
+
+SCRIPT_API(Nav_GetRunwayEnd, bool(std::string const& airport, std::string const& end, float& x, float& y, float& z, float& heading))
+{
+    const dnav::Airport* a = airportNamed(airport);
+    if (!a) return false;
+    for (const auto& r : a->runways) {
+        if (r.removed) continue;
+        for (int e = 0; e < 2; e++) {
+            if (r.endName[e] != end) continue;
+            const dnav::Vec3 p = r.pointAt(r.thresholdAlong(e));
+            x = p.x;
+            y = p.y;
+            z = p.z;
+            heading = r.headingFrom(e);
+            return true;
+        }
+    }
+    return false;
+}
+
+SCRIPT_API(Nav_SetRunwayOpen, bool(std::string const& airport, std::string const& runway, bool open))
+{
+    int ap = -1;
+    const dnav::Airport* a = airportNamed(airport, &ap);
+    const int r = a ? a->runway(runway) : -1;
+    if (r < 0) return false;
+    nav()->atc_.setOpen(ap, r, open);
+    return true;
+}
+
+// Who has a runway (an NPC id), or -1.
+SCRIPT_API(Nav_GetRunwayUser, int(std::string const& airport, std::string const& runway))
+{
+    int ap = -1;
+    const dnav::Airport* a = airportNamed(airport, &ap);
+    const int r = a ? a->runway(runway) : -1;
+    return r < 0 ? -1 : nav()->atc_.user(ap, r);
+}
+
+SCRIPT_API(Nav_LoadAirports, bool(std::string const& path))
+{
+    if (!nav()) return false;
+    std::string error;
+    if (!nav()->airports_.loadFile(path, error)) {
+        nav()->logError(error);
+        return false;
+    }
+    return true;
+}
+
+SCRIPT_API(Nav_AddRoutePoint, bool(std::string const& route, float x, float y, float z))
+{
+    if (!nav() || route.empty()) return false;
+    nav()->airports_.addRoutePoint(route, { x, y, z });
+    return true;
+}
+
+SCRIPT_API(Nav_ClearRoute, bool(std::string const& route))
+{
+    if (!nav() || !nav()->airports_.route(route)) return false;
+    nav()->airports_.setRoute(route, {});
     return true;
 }
