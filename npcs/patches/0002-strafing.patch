@@ -1,0 +1,61 @@
+--- a/Server/Components/NPCs/NPC/npc.cpp
++++ b/Server/Components/NPCs/NPC/npc.cpp
+@@ -2221,6 +2221,7 @@
+ 
+ 	uint16_t upAndDown, leftAndRight, keys;
+ 	getKeys(upAndDown, leftAndRight, keys);
++	strafeKeys(upAndDown, leftAndRight); // DiamondNav: moving while it aims
+ 
+ 	bool needsImmediateUpdate = footSync_.LeftRight != leftAndRight || footSync_.UpDown != upAndDown || footSync_.Keys != keys || footSync_.Position != position_ || footSync_.Rotation.q != rotation_.q || footSync_.HealthArmour.x != health_ || footSync_.HealthArmour.y != armour_ || footSync_.Weapon != weapon_ || footSync_.Velocity != velocity_ || footSync_.AnimationID != animationId_ || footSync_.AnimationFlags != animationFlags_ || footSync_.SpecialAction != specialAction_;
+ 
+@@ -3428,3 +3429,38 @@
+ 	float side = toTarget.x * glm::cos(heading) + toTarget.y * glm::sin(heading);
+ 	applyKey(side >= 0.0f ? Key::LOOK_RIGHT : Key::LOOK_LEFT);
+ }
++
++// DiamondNav: strafing (npcs/patches/0002-strafing.patch). Stock open.mp
++// turns an NPC that walks or jogs while it aims toward where it walks and always presses
++// forward, so it slides sideways facing the wrong way. On foot, aiming and walking or
++// jogging, it now keeps facing what it aims at and presses the direction it really moves
++// (forward, back, left, right, or a diagonal), so players see GTA's own strafe and
++// run-and-gun animations for its weapon: side-steps with a Deagle or an M4, moving fire
++// with an Uzi. Sprinting still stops the aim, as in GTA.
++void NPC::strafeKeys(uint16_t& upAndDown, uint16_t& leftAndRight)
++{
++	if (vehicle_ || !aiming_ || !moving_ || moveType_ == NPCMoveType_Sprint || moveType_ == NPCMoveType_Drive)
++	{
++		return;
++	}
++	glm::vec2 velocity(velocity_.x, velocity_.y);
++	float speed = glm::length(velocity);
++	glm::vec2 toAim(aimAt_.x - position_.x, aimAt_.y - position_.y);
++	if (speed <= FLT_EPSILON || glm::length(toAim) < 0.5f)
++	{
++		return;
++	}
++	float angle = getAngleOfLine(toAim.x, toAim.y);
++	auto rotation = rotation_.ToEuler();
++	rotation.z = angle;
++	rotation_ = GTAQuat(rotation);
++
++	float heading = glm::radians(angle);
++	glm::vec2 front(-sin(heading), cos(heading));
++	glm::vec2 right(cos(heading), sin(heading));
++	float ahead = glm::dot(velocity, front) / speed;
++	float side = glm::dot(velocity, right) / speed;
++	// About 67 degrees either side of a straight line still counts as that way alone.
++	upAndDown = ahead > 0.38f ? static_cast<uint16_t>(Key::UP) : (ahead < -0.38f ? static_cast<uint16_t>(Key::DOWN) : 0);
++	leftAndRight = side > 0.38f ? static_cast<uint16_t>(Key::RIGHT) : (side < -0.38f ? static_cast<uint16_t>(Key::LEFT) : 0);
++}
+--- a/Server/Components/NPCs/NPC/npc.hpp
++++ b/Server/Components/NPCs/NPC/npc.hpp
+@@ -319,6 +319,9 @@
+ 
+ 	void updateDriveByKeys();
+ 
++	// DiamondNav: strafing (npcs/patches/0002)
++	void strafeKeys(uint16_t& upAndDown, uint16_t& leftAndRight);
++
+ 	IVehicle* getEnteringVehicle() override
+ 	{
+ 		return vehicleToEnter_;
